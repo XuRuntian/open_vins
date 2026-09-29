@@ -1,0 +1,29 @@
+%YAML:1.0
+cam0:
+  camera_model: pinhole
+  distortion_coeffs: [0.0, 0.0, 0.0, 0.0]
+  distortion_model: radtan
+  intrinsics: [160.0, 160.0, 160.0, 120.0]
+  resolution: [320, 240]
+  timeshift_cam_imu: 0.0
+  T_imu_cam:
+    - [1.0, 0.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0, 0.0]
+    - [0.0, 0.0, 1.0, 0.0]
+    - [0.0, 0.0, 0.0, 1.0]
+  cam_overlaps: [1]
+  rostopic: /roboego_vio/cam0/image_raw
+cam1:
+  camera_model: pinhole
+  distortion_coeffs: [0.0, 0.0, 0.0, 0.0]
+  distortion_model: radtan
+  intrinsics: [160.0, 160.0, 160.0, 120.0]
+  resolution: [320, 240]
+  timeshift_cam_imu: 0.0
+  T_imu_cam:
+    - [1.0, 0.0, 0.0, 0.1]
+    - [0.0, 1.0, 0.0, 0.0]
+    - [0.0, 0.0, 1.0, 0.0]
+    - [0.0, 0.0, 0.0, 1.0]
+  cam_overlaps: [0]
+  rostopic: /roboego_vio/cam1/image_raw
