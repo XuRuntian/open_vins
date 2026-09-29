@@ -11,4 +11,4 @@ if __name__ == "__main__":
     args = parse_args(["--binary", str(binary), *sys.argv[1:]])
     # The original orchestrator already appends /trajectory to output_dir.
     destination = args.output_dir if args.manifest is None else None
-    raise SystemExit(run(args, output_dir=destination))
+    raise SystemExit(run(args, output_dir=destination, legacy_report=True))

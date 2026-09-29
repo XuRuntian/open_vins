@@ -85,7 +85,8 @@ public:
 int run(int argc, char **argv) {
   if (argc == 2 && std::string(argv[1]) == "--help") {
     std::cout << "roboego_openvins_offline --config FILE --left_video FILE --right_video FILE "
-                 "--stereo_pairs CSV --imu CSV --output_dir DIR [--start_s 0] [--duration_s SECONDS]\n";
+                 "--stereo_pairs CSV --imu CSV --output_dir DIR [--start_s 0] [--duration_s SECONDS] "
+                 "[--time-offset-mode config|estimate]\n";
     return 0;
   }
   std::map<std::string, std::string> args;
@@ -97,7 +98,8 @@ int run(int argc, char **argv) {
   for (const auto &key : required) if (!args.count(key)) throw std::runtime_error("Missing argument: " + key);
   for (const auto &arg : args) {
     if (std::find(required.begin(), required.end(), arg.first) == required.end() &&
-        arg.first != "--start_s" && arg.first != "--duration_s") throw std::runtime_error("Unknown argument: " + arg.first);
+        arg.first != "--start_s" && arg.first != "--duration_s" && arg.first != "--time-offset-mode")
+      throw std::runtime_error("Unknown argument: " + arg.first);
   }
   double start = args.count("--start_s") ? number(args.at("--start_s")) : 0.0;
   double duration = args.count("--duration_s") ? number(args.at("--duration_s")) : std::numeric_limits<double>::infinity();
@@ -114,6 +116,11 @@ int run(int argc, char **argv) {
   ov_core::Printer::setPrintLevel(verbosity);
   ov_msckf::VioManagerOptions params;
   params.print_and_load(parser);
+  const std::string time_mode = args.count("--time-offset-mode") ? args.at("--time-offset-mode") : "config";
+  if (time_mode != "config" && time_mode != "estimate") throw std::runtime_error("Invalid time-offset mode");
+  // Session timing can differ from the calibration recording. Reuse the
+  // official offset state instead of hard-coding a correction for one session.
+  if (time_mode == "estimate") params.state_options.do_calib_camera_timeoffset = true;
   if (!parser->successful()) throw std::runtime_error("OpenVINS configuration is incomplete");
   if (params.state_options.num_cameras != 2) throw std::runtime_error("Adapter requires two cameras");
   // Offline replay must wait for initialization; otherwise fast replay can end
@@ -128,9 +135,9 @@ int run(int argc, char **argv) {
   std::ofstream states(output / "states.csv");
   std::ofstream diagnostics(output / "frame_status.csv");
   if (!states || !diagnostics) throw std::runtime_error("Cannot create output files");
-  states << "timestamp,timestamp_imu,left_frame_index,right_frame_index,px,py,pz,qx,qy,qz,qw\n" << std::setprecision(17);
-  diagnostics << "timestamp,initialized,state_advanced,msckf_features,slam_features\n" << std::setprecision(17);
-  size_t imu_index = 0, processed = 0, poses = 0, unbracketed = 0;
+  states << "timestamp,timestamp_imu,left_frame_index,right_frame_index,px,py,pz,qx,qy,qz,qw,vx,vy,vz,legacy_qx,legacy_qy,legacy_qz,legacy_qw\n" << std::setprecision(17);
+  diagnostics << "timestamp,initialized,state_advanced,msckf_features,slam_features,time_offset_s,left_frame_index,right_frame_index,timestamp_imu,status\n" << std::setprecision(17);
+  size_t imu_index = 0, processed = 0, poses = 0, unbracketed = 0, published_imu = 0;
   while (imu_index + 1 < imu.size() && imu[imu_index + 1].at("timestamp") < begin + params.calib_camimu_dt - params.init_options.init_window_time - 1.0) ++imu_index;
   const auto wall_start = std::chrono::steady_clock::now();
   for (const auto &pair : pairs) {
@@ -142,6 +149,10 @@ int run(int argc, char **argv) {
     // after camera time, allowing the propagator to interpolate both endpoints.
     if (timestamp_imu < imu.front().at("timestamp") || timestamp_imu >= imu.back().at("timestamp")) {
       ++unbracketed;
+      diagnostics << timestamp << ',' << (system.initialized_time() >= 0) << ",0,0,0,"
+                  << system.get_state()->_calib_dt_CAMtoIMU->value()(0) << ','
+                  << pair.at("left_frame_index") << ',' << pair.at("right_frame_index") << ','
+                  << timestamp_imu << ",imu_unavailable\n";
       continue;
     }
     while (imu_index < imu.size() && (imu_index == 0 || imu[imu_index - 1].at("timestamp") <= timestamp_imu)) {
@@ -151,6 +162,7 @@ int run(int argc, char **argv) {
       message.wm << row.at("angular_velocity_x"), row.at("angular_velocity_y"), row.at("angular_velocity_z");
       message.am << row.at("linear_acceleration_x"), row.at("linear_acceleration_y"), row.at("linear_acceleration_z");
       system.feed_measurement_imu(message);
+      ++published_imu;
       if (message.timestamp > timestamp_imu) break;
     }
     ov_core::CameraData message;
@@ -165,16 +177,29 @@ int run(int argc, char **argv) {
     // startup has an initialization time but no visual update yet.
     bool initialized = system.initialized_time() >= 0;
     bool advanced = initialized && std::abs(state->_timestamp - timestamp) < 1e-6;
+    bool finite = state->_imu->pos().allFinite() && state->_imu->vel().allFinite()
+                  && state->_imu->quat().allFinite();
+    const char *status = !initialized ? "initializing" : !advanced ? "state_not_advanced"
+                         : !finite ? "invalid_state" : "valid";
     diagnostics << timestamp << ',' << initialized << ',' << advanced << ','
-                << system.get_good_features_MSCKF().size() << ',' << system.get_features_SLAM().size() << '\n';
+                << system.get_good_features_MSCKF().size() << ',' << system.get_features_SLAM().size() << ','
+                << state->_calib_dt_CAMtoIMU->value()(0) << ','
+                << pair.at("left_frame_index") << ',' << pair.at("right_frame_index") << ','
+                << timestamp + state->_calib_dt_CAMtoIMU->value()(0) << ',' << status << '\n';
     if (advanced) {
       // OpenVINS stores R_global_to_imu; export Hamilton quaternion for T_world_imu.
       const Eigen::Quaterniond quaternion(state->_imu->Rot().transpose());
       const Eigen::Vector3d position = state->_imu->pos();
-      if (!position.allFinite() || !quaternion.coeffs().allFinite()) throw std::runtime_error("Non-finite VIO pose");
-      states << timestamp << ',' << timestamp_imu << ',' << pair.at("left_frame_index") << ',' << pair.at("right_frame_index")
+      const Eigen::Vector3d velocity = state->_imu->vel();
+      const auto legacy_quaternion = state->_imu->quat();
+      if (!position.allFinite() || !quaternion.coeffs().allFinite() || !velocity.allFinite() || !legacy_quaternion.allFinite())
+        throw std::runtime_error("Non-finite VIO state");
+      states << timestamp << ',' << timestamp + state->_calib_dt_CAMtoIMU->value()(0) << ','
+             << pair.at("left_frame_index") << ',' << pair.at("right_frame_index")
              << ',' << position.x() << ',' << position.y() << ',' << position.z()
-             << ',' << quaternion.x() << ',' << quaternion.y() << ',' << quaternion.z() << ',' << quaternion.w() << '\n';
+             << ',' << quaternion.x() << ',' << quaternion.y() << ',' << quaternion.z() << ',' << quaternion.w()
+             << ',' << velocity.x() << ',' << velocity.y() << ',' << velocity.z()
+             << ',' << legacy_quaternion(0) << ',' << legacy_quaternion(1) << ',' << legacy_quaternion(2) << ',' << legacy_quaternion(3) << '\n';
       ++poses;
     }
   }
@@ -182,8 +207,12 @@ int run(int argc, char **argv) {
   std::ofstream summary(output / "offline_report.json");
   const std::string status = poses == 0 ? "not_initialized" : (poses < 2 ? "insufficient_poses" : "completed");
   summary << "{\"status\":\"" << status << "\",\"processed_camera_frames\":" << processed
+          << ",\"published_imu_samples\":" << published_imu
           << ",\"pose_count\":" << poses << ",\"unbracketed_camera_frames\":" << unbracketed
-          << ",\"wall_duration_s\":" << elapsed << "}\n";
+          << ",\"wall_duration_s\":" << elapsed
+          << ",\"time_offset_estimated\":" << (params.state_options.do_calib_camera_timeoffset ? "true" : "false")
+          << ",\"initial_time_offset_s\":" << params.calib_camimu_dt
+          << ",\"final_time_offset_s\":" << system.get_state()->_calib_dt_CAMtoIMU->value()(0) << "}\n";
   std::cout << "VIO status=" << status << " frames=" << processed << " poses=" << poses << '\n';
   return poses >= 2 ? 0 : 3;
 }

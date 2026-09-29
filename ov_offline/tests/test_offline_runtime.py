@@ -87,7 +87,11 @@ def test_uninitialized_replay_is_failure_with_diagnostics(tmp_path):
     assert report["offline"]["processed_camera_frames"] == 20
     assert report["offline"]["unbracketed_camera_frames"] == 0
     assert (root / "trajectory.jsonl").read_text() == ""
-    assert np.load(root / "trajectory.npz")["T_world_camera"].shape == (0, 4, 4)
+    result = np.load(root / "trajectory.npz")
+    assert result["T_world_camera"].shape == (20, 4, 4)
+    assert not (result['status'] == 'valid').any()
+    assert set(result["status"]) == {"initializing"}
+    assert np.isnan(result["T_world_camera"]).all()
     assert (root / "frame_status.csv").is_file()
     with pytest.raises(FileExistsError):
         run(args)
@@ -105,8 +109,10 @@ def test_official_zero_velocity_option_initializes_stationary_fixture(tmp_path):
     assert run(args) == 0
     trajectory = np.load(tmp_path / "output/trajectory/trajectory.npz")
     assert len(trajectory["frame_index"]) >= 2
-    assert np.isfinite(trajectory["T_world_camera"]).all()
-    positions = trajectory["T_world_camera"][:, :3, 3]
+    assert len(trajectory['frame_index']) == 100
+    valid = trajectory['status'] == 'valid'
+    assert np.isfinite(trajectory["T_world_camera"][valid]).all()
+    positions = trajectory["T_world_camera"][valid, :3, 3]
     assert np.linalg.norm(positions[-1] - positions[0]) < 0.01
 
 
@@ -127,6 +133,22 @@ def test_replay_honors_requested_time_range(tmp_path):
     assert run(args) == 3
     report = json.loads((tmp_path / "output/trajectory/run_report.json").read_text())
     assert report["offline"]["processed_camera_frames"] == 3
+    result = np.load(tmp_path / "output/trajectory/trajectory.npz")
+    assert len(result['frame_index']) == 20
+    assert np.sum(result['status'] == 'not_requested') == 17
+
+
+@pytest.mark.parametrize("mode,estimated", [("config", False), ("estimate", True)])
+def test_time_offset_mode_is_explicit_and_does_not_edit_source_config(tmp_path, mode, estimated):
+    args = make_replay(tmp_path)
+    config_path = tmp_path / "config/estimator_config.yaml"
+    before = config_path.read_bytes()
+    args.time_offset_mode = mode
+    assert run(args) == 3
+    report = json.loads((tmp_path / "output/trajectory/run_report.json").read_text())
+    assert report["offline"]["time_offset_estimated"] is estimated
+    assert report["offline"]["initial_time_offset_s"] == 0.
+    assert config_path.read_bytes() == before
 
 
 def test_standalone_cli_without_project_manifest(tmp_path):
@@ -156,3 +178,34 @@ def test_legacy_cli_exports_into_exact_output_directory(tmp_path, stationary_ini
     assert report["status"] == ("complete" if expected == 0 else "not_initialized")
     assert (output / "trajectory.npz").is_file()
     assert not (output / "trajectory").exists()
+    assert report["schema_version"] == "1.0"
+    assert report["backend"] == "openvins_offline"
+    assert report["initialized"] == (expected == 0)
+    assert report["published_stereo_pairs"] == report["offline"]["processed_camera_frames"]
+    assert report["published_imu_samples"] > 0
+    assert report["artifacts"]["trajectory_jsonl"] == str(output / "trajectory.jsonl")
+    poses = [json.loads(line) for line in (output / "trajectory.jsonl").read_text().splitlines()]
+    assert len(poses) == report["pose_count"]
+    with (output / "states.csv").open() as handle:
+        states = list(csv.DictReader(handle))
+    for pose, state in zip(poses, states):
+        assert pose["orientation_world_imu_xyzw"] == [float(state[k]) for k in
+                                                        ("legacy_qx", "legacy_qy", "legacy_qz", "legacy_qw")]
+        assert pose["velocity_world_imu"] == [float(state[k]) for k in ("vx", "vy", "vz")]
+        np.testing.assert_allclose(pose["position_world_imu"], np.array(pose["T_world_imu"])[:3, 3])
+
+
+def test_imu_boundary_frames_are_present_and_classified(tmp_path):
+    args = make_replay(tmp_path)
+    imu = tmp_path / 'imu.csv'
+    with imu.open() as handle:
+        rows = list(csv.DictReader(handle))
+    with imu.open('w') as handle:
+        writer = csv.DictWriter(handle, fieldnames=IMU_FIELDS)
+        writer.writeheader()
+        writer.writerows(row for row in rows if 1.04 <= float(row['timestamp']) <= 1.6)
+    assert run(args) == 3
+    result = np.load(tmp_path / 'output/trajectory/trajectory.npz')
+    assert len(result['frame_index']) == 20
+    assert result['status'][0] == result['status'][1] == result['status'][-1] == 'imu_unavailable'
+    assert not (result['status'] == 'valid').any()
