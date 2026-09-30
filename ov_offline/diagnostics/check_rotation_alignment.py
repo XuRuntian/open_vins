@@ -16,8 +16,12 @@ import yaml
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("session", type=Path)
+    parser.add_argument("--start-seconds", type=float, default=0,
+                        help="Window start relative to the first camera timestamp")
     parser.add_argument("--seconds", type=float, default=10)
     args = parser.parse_args()
+    if args.start_seconds < 0 or args.seconds <= 0:
+        parser.error("Window start must be nonnegative and duration must be positive")
     cv2.setRNGSeed(0)
     root = args.session
     calibration = yaml.safe_load((root / "calibrations/camera_imu-camchain-imucam.yaml").read_text())["cam0"]
@@ -37,12 +41,13 @@ def main():
     previous = None
     samples = []
     for index, timestamp in enumerate(ts):
-        if timestamp - ts[0] > args.seconds:
+        elapsed = timestamp - ts[0]
+        if elapsed > args.start_seconds + args.seconds:
             break
         ok, frame = cap.read()
         if not ok:
             break
-        if index % 3:
+        if elapsed < args.start_seconds or index % 3:
             continue
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         if previous is not None:
@@ -82,7 +87,8 @@ def main():
                        "p90_error_deg": float(np.rad2deg(np.percentile(error, 90))),
                        "correlation": float(np.corrcoef(observed.ravel(), predicted.ravel())[0, 1])})
     configured = min(scores, key=lambda x: abs(x["shift_s"]-calibration["timeshift_cam_imu"]))
-    print(json.dumps({"session": root.name, "pairs": len(samples), "configured_nearest": configured,
+    print(json.dumps({"session": root.name, "start_seconds": args.start_seconds,
+                      "duration_seconds": args.seconds, "pairs": len(samples), "configured_nearest": configured,
                       "best": sorted(scores, key=lambda x: x["median_error_deg"])[:5]}, indent=2))
 
 

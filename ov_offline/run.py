@@ -33,6 +33,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--time-offset-mode", choices=("estimate", "config"),
                         default=os.environ.get("OPENVINS_TIME_OFFSET_MODE", "estimate"),
                         help="Estimate camera/IMU offset online, or honor calib_cam_timeoffset in the YAML")
+    parser.add_argument("--timing-bootstrap", choices=("auto", "off"),
+                        default=os.environ.get("OPENVINS_TIMING_BOOTSTRAP"),
+                        help="Confidence-checked offline timing look-ahead (native default: auto in estimate mode)")
     args = parser.parse_args(argv)
     direct = ("left_video", "right_video", "stereo_pairs", "imu", "output_dir")
     if args.config and any(getattr(args, name) is None for name in direct):
@@ -145,6 +148,11 @@ def run(args: argparse.Namespace, *, output_dir: Path | None = None, legacy_repo
     if mode not in {"estimate", "config"}:
         raise ValueError("time_offset_mode must be estimate or config")
     command.extend(["--time-offset-mode", mode])
+    bootstrap = getattr(args, "timing_bootstrap", None)
+    if bootstrap is not None:
+        if bootstrap not in {"auto", "off"}:
+            raise ValueError("timing_bootstrap must be auto or off")
+        command.extend(["--timing-bootstrap", bootstrap])
     started = time.monotonic()
     report = {"schema_version": "roboego.vio.offline.v1", "status": "failed", "command": command,
               "pose_count": 0, "covariance_exported": False}

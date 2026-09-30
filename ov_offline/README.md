@@ -2,9 +2,10 @@
 
 This module owns stereo/IMU replay, native OpenVINS invocation, trajectory
 conversion and diagnostics. It does not import or require roboego-hand-vis.
-The estimator implementation and initialization defaults are unchanged. Offline
-Python/compatibility entrypoints now enable the official online camera/IMU time
-offset state by default; see Timing below. ROS support elsewhere
+Offline synchronous stereo initialization now replenishes features when shared
+stereo IDs leave the initializer starved. Acceptance thresholds are unchanged.
+Python/compatibility entrypoints enable camera/IMU timing bootstrap and the
+official online offset state by default; see Timing below. ROS support elsewhere
 in this repository is retained.
 
 ## Build
@@ -172,6 +173,15 @@ Fixtures are synthetic, not device calibration. Tests cover export, input
 validation, time selection, uninitialized failure and stationary ZUPT startup.
 The module can be built and tested with only this repository mounted.
 
+For a data-only, full-session Docker regression, use
+`diagnostics/audit_runtime.py --data-root DIR --output NEW_DIR --image IMAGE`.
+It pins the image ID, runs raw/rectified inputs, checks the delivery contract and
+flags gross trajectory symptoms without altering estimates. `--reference DIR`
+compares common frames with a prior audit. Relocated rectified manifests can
+use `--manifest-mount-alias` for validated read-only original-path mounts, not
+rewritten metadata. See `diagnostics/RELEASE_AUDIT_20260930.md` for the tested
+matrix and limits; passing the audit is not an accuracy certificate.
+
 ## Original Orchestrator Compatibility
 
 The build target `roboego_openvins_offline` produces two sibling files:
@@ -197,8 +207,9 @@ No project-side Python modifications are needed. The original project's
 
 The offline Python entry and compatibility launcher default to
 `--time-offset-mode estimate`. This enables OpenVINS' existing
-`do_calib_camera_timeoffset` state; the YAML offset is the initial estimate, not
-a session-specific hard-coded correction. The native C++ entry alone defaults
+`do_calib_camera_timeoffset` state. Before creating the initializer/filter, a
+confidence-checked bootstrap can replace the YAML initial offset using the
+requested recording, not a session-specific hard-coded correction. The native C++ entry alone defaults
 to `config` to honor explicit native configurations. `--time-offset-mode config`
 on either CLI honors `calib_cam_timeoffset` from the YAML. The compatibility
 launcher also accepts the environment default `OPENVINS_TIME_OFFSET_MODE`.
@@ -208,6 +219,58 @@ offset was estimated, its initial value and its final value. Per-frame offsets
 are in `frame_status.csv`; exported IMU timestamps use the updated estimate.
 Online calibration requires informative observations and is not guaranteed to
 repair arbitrary synchronization, calibration or low-excitation failures.
+
+### Offline Startup Alignment
+
+`--timing-bootstrap auto` is the native default in `estimate` mode. It reads up
+to the first six seconds **inside the requested camera window**, estimates
+short-baseline visual rotations with OpenCV KLT/RANSAC using the supplied camera
+model, and compares them to calibrated gyro integration. It searches +/-100 ms
+around the supplied calibration in 2 ms increments, using only intervals with
+IMU coverage for the entire search. IMU endpoints are never extrapolated; gaps
+over 20 ms disqualify an interval. No earlier IMU is obtained from another file.
+
+Acceptance requires at least 24 intervals spanning 2.4 seconds, varying rotation,
+consistent estimates in the first/second halves, an interior and distinguishable
+minimum, and a materially better fit than the calibration. Constant gyro bias
+is treated as a nuisance in scoring, not installed as a filter bias. These are
+conservative bootstrap checks, not statistical confidence intervals or relaxed
+OpenVINS initialization/update thresholds. If checks fail, the calibration is
+retained and the rejection reason is reported; this does **not** certify it as
+correct. The existing initializer may still fail or produce an inaccurate pose.
+
+Accepted timing is applied to both `VioManagerOptions.calib_camimu_dt` and
+`init_options.calib_camimu_dt` before constructing OpenVINS. Online offset
+estimation then continues normally. Source timestamps/calibrations and spatial
+extrinsics are not edited. Replay starts again from the requested beginning;
+look-ahead does not advance the VIO state or fabricate initial poses. This is an
+offline, noncausal preprocessing step: the first pose timestamp is **not** a
+real-time startup latency measurement. A timing change may legitimately change
+IMU boundary coverage and the first initialized frame.
+
+Use `--timing-bootstrap off` (or `OPENVINS_TIMING_BOOTSTRAP=off` for the Python
+launcher) to isolate the previous online-only behavior. `--time-offset-mode
+config` always disables bootstrap and honors the YAML's online-calibration flag.
+`offline.timing_bootstrap` in the delivery report records the decision, original
+and candidate offsets, usable interval count, residual scores and split-window
+disagreement. Zero scores in an early rejection mean fitting was not performed.
+No new per-frame arrays or default delivery artifacts are added.
+
+Limitations: essential-matrix rotations can be biased by dynamic objects,
+translation/degenerate geometry or incorrect calibration. The checks can reject
+useful data and cannot rule out every false alignment. This is a repair of the
+reproduced startup failure, not a replacement sensor calibration or proof of
+upstream timestamp provenance. Four local full recordings plus the two fixed
+cold windows are regression evidence, not ground-truth accuracy validation.
+
+```bash
+cmake --build ov_msckf/build --target offline_timing_test
+ov_msckf/build/offline_timing_test
+VIO_PRIVATE_DATA_ROOT=/data/ego_data \
+VIO_SHELF_COLD_FIXTURE=/data/ego_data/vio_frame_aligned_20260929/cold_fixture \
+VIO_OFFLINE_BINARY="$PWD/ov_msckf/build/openvins_offline_native" \
+  python3 -m pytest ov_offline/tests/test_cold_start_regression.py -q
+```
 
 The private cashier regression demonstrated 35 m drift in 10 seconds with the
 fixed -47.8 ms offset. Full replay with online estimation converged to -6.8 ms,

@@ -310,6 +310,17 @@ void VioManager::track_image_and_update(const ov_core::CameraData &message_const
   if (!is_initialized_vio) {
     is_initialized_vio = try_to_initialize(message);
     if (!is_initialized_vio) {
+      // Stereo observations share IDs: the divided per-camera budget can stop
+      // replenishment below the dynamic initializer's unique-feature gate.
+      // Inspect its cleaned database only after a synchronous attempt finishes.
+      if (!params.use_multi_threading_subs && params.use_klt && params.use_stereo &&
+          params.state_options.num_cameras == 2 && params.init_options.init_dyn_use &&
+          trackFEATS->get_num_features() < params.init_options.init_max_features) {
+        const auto count = trackFEATS->get_feature_database()->get_internal_data().size();
+        if (count > 0 && count < 0.75 * params.init_options.init_max_features) {
+          trackFEATS->set_num_features(params.init_options.init_max_features);
+        }
+      }
       double time_track = (rT2 - rT1).total_microseconds() * 1e-6;
       PRINT_DEBUG(BLUE "[TIME]: %.4f seconds for tracking\n" RESET, time_track);
       return;

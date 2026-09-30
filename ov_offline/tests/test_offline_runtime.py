@@ -148,7 +148,20 @@ def test_time_offset_mode_is_explicit_and_does_not_edit_source_config(tmp_path, 
     report = json.loads((tmp_path / "output/trajectory/run_report.json").read_text())
     assert report["offline"]["time_offset_estimated"] is estimated
     assert report["offline"]["initial_time_offset_s"] == 0.
+    bootstrap = report["offline"]["timing_bootstrap"]
+    assert not bootstrap["applied"]
+    assert bootstrap["reason"] == ("disabled" if mode == "config" else "insufficient_observations")
     assert config_path.read_bytes() == before
+
+
+def test_timing_bootstrap_can_be_disabled_without_disabling_online_offset(tmp_path):
+    args = make_replay(tmp_path)
+    args.time_offset_mode = "estimate"
+    args.timing_bootstrap = "off"
+    assert run(args) == 3
+    report = json.loads((tmp_path / "output/trajectory/run_report.json").read_text())
+    assert report["offline"]["time_offset_estimated"]
+    assert report["offline"]["timing_bootstrap"]["reason"] == "disabled"
 
 
 def test_standalone_cli_without_project_manifest(tmp_path):
