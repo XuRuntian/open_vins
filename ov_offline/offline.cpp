@@ -251,6 +251,11 @@ int run(int argc, char **argv) {
       continue;
     }
     while (imu_index < imu.size() && (imu_index == 0 || imu[imu_index - 1].at("timestamp") <= timestamp_imu)) {
+      // Boundary trimming must not silently turn an internal dropout into an
+      // interpolated IMU measurement. Check only samples actually replayed.
+      if (published_imu > 0 && imu[imu_index].at("timestamp") - imu[imu_index - 1].at("timestamp") > 0.05 + 1e-9)
+        throw std::runtime_error("Internal IMU gap exceeds 0.05 seconds at timestamp " +
+                                 std::to_string(imu[imu_index].at("timestamp")));
       const auto &row = imu[imu_index++];
       ov_core::ImuData message;
       message.timestamp = row.at("timestamp");

@@ -222,3 +222,81 @@ def test_imu_boundary_frames_are_present_and_classified(tmp_path):
     assert len(result['frame_index']) == 20
     assert result['status'][0] == result['status'][1] == result['status'][-1] == 'imu_unavailable'
     assert not (result['status'] == 'valid').any()
+
+
+@pytest.mark.parametrize("offset", [-0.04, 0.04])
+@pytest.mark.parametrize("mode", ["config", "estimate"])
+@pytest.mark.parametrize("missing", [10, 30])
+def test_boundary_gaps_keep_alignment_without_frame_limit(tmp_path, offset, mode, missing):
+    args = make_replay(tmp_path, frames=150, textured=True, stationary_init=True)
+    args.time_offset_mode = mode
+    camera_config = tmp_path / 'config/kalibr_imucam_chain.yaml'
+    camera_config.write_text(camera_config.read_text().replace(
+        'timeshift_cam_imu: 0.0', f'timeshift_cam_imu: {offset}'))
+    # Cut between video frames in the IMU clock, without imposing a QC limit.
+    imu = tmp_path / 'imu.csv'
+    with imu.open() as handle:
+        rows = list(csv.DictReader(handle))
+    with imu.open('w') as handle:
+        writer = csv.DictWriter(handle, fieldnames=IMU_FIELDS)
+        writer.writeheader()
+        writer.writerows(row for row in rows
+                         if 1 + (missing - 0.5) / 30 + offset <= float(row['timestamp'])
+                         <= 1 + (149.5 - missing) / 30 + offset)
+    original_imu = imu.read_bytes()
+    assert run(args) == 0
+    root = tmp_path / 'output/trajectory'
+    with np.load(root / 'trajectory.npz', allow_pickle=False) as result:
+        np.testing.assert_array_equal(result['frame_index'], np.arange(150))
+        np.testing.assert_array_equal(result['right_frame_index'], np.arange(150))
+        np.testing.assert_allclose(result['timestamp_camera'], 1 + np.arange(150) / 30)
+        assert (result['status'][:missing] == 'imu_unavailable').all()
+        assert (result['status'][-missing:] == 'imu_unavailable').all()
+        assert result['status'][missing] == 'initializing'
+        assert result['status'][149 - missing] == 'valid'
+        valid = result['status'] == 'valid'
+        for key in ('T_world_imu', 'T_world_camera'):
+            assert np.isnan(result[key][~valid]).all()
+            assert np.isfinite(result[key][valid]).all()
+    report = json.loads((root / 'run_report.json').read_text())
+    assert report['status'] == 'complete'
+    assert report['offline']['unbracketed_camera_frames'] == 2 * missing
+    assert report['offline']['processed_camera_frames'] == 150 - 2 * missing
+    assert imu.read_bytes() == original_imu
+
+
+def test_internal_imu_gap_fails_instead_of_bridging_it(tmp_path):
+    args = make_replay(tmp_path, frames=150, textured=True, stationary_init=True)
+    args.time_offset_mode = 'config'
+    imu = tmp_path / 'imu.csv'
+    with imu.open() as handle:
+        rows = list(csv.DictReader(handle))
+    with imu.open('w') as handle:
+        writer = csv.DictWriter(handle, fieldnames=IMU_FIELDS)
+        writer.writeheader()
+        writer.writerows(row for row in rows if not 4.0 < float(row['timestamp']) < 4.1)
+    assert run(args) == 2
+    root = tmp_path / 'output/trajectory'
+    assert 'Internal IMU gap exceeds 0.05 seconds' in (root.parent / 'openvins.log').read_text()
+    assert json.loads((root / 'run_report.json').read_text())['status'] == 'failed'
+    with np.load(root / 'trajectory.npz', allow_pickle=False) as result:
+        assert (result['status'] == 'valid').any()
+        assert (result['status'][91:] == 'not_processed').all()
+        assert np.isnan(result['T_world_camera'][91:]).all()
+
+
+def test_no_imu_overlap_exports_empty_rows_and_fails(tmp_path):
+    args = make_replay(tmp_path)
+    args.time_offset_mode = 'config'
+    imu = tmp_path / 'imu.csv'
+    with imu.open() as handle:
+        rows = list(csv.DictReader(handle))
+    with imu.open('w') as handle:
+        writer = csv.DictWriter(handle, fieldnames=IMU_FIELDS)
+        writer.writeheader()
+        writer.writerows(row for row in rows if float(row['timestamp']) < 0.5)
+    assert run(args) == 3
+    with np.load(tmp_path / 'output/trajectory/trajectory.npz', allow_pickle=False) as result:
+        np.testing.assert_array_equal(result['frame_index'], np.arange(20))
+        assert (result['status'] == 'imu_unavailable').all()
+        assert np.isnan(result['T_world_camera']).all()

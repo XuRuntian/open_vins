@@ -48,6 +48,18 @@ Kalibr conversion remain upstream data preparation, not estimator logic.
   matched stereo pairs. Additional numeric CSV columns are accepted.
 - `timestamp_imu = timestamp_camera + timeshift_cam_imu`; boundary camera frames
   without IMU bracketing are counted and skipped. Do not shift timestamps twice.
+- Missing IMU at the video boundaries is not a whole-run failure: replay starts
+  at the first supported pair and stops feeding cameras when coverage ends.
+  The frame-aligned NPZ retains every original left-video frame, with NaN poses
+  and `imu_unavailable` for unsupported pairs. IMU samples and poses are never
+  padded, extrapolated or copied from neighboring frames. Initialization can
+  leave additional supported frames without poses (`initializing`).
+- The acquisition QC policy (for example, up to ten missing frames at each end)
+  remains upstream; this adapter imposes no boundary missing-frame count or
+  missing-duration limit. A preparation layer must allow these recordings to reach replay.
+  Internal gaps over 0.05 seconds between replayed IMU samples fail the run
+  before the gap is fed to the estimator. Frames not reached remain
+  `not_processed`; the estimator is not restarted across a gap.
 - `start_s` is relative to the first stereo timestamp; `duration_s` is optional.
   The adapter sequentially decodes to the selected frame indices.
 
@@ -171,6 +183,9 @@ VIO_OFFLINE_BINARY="$PWD/ov_msckf/build/openvins_offline_native" \
 
 Fixtures are synthetic, not device calibration. Tests cover export, input
 validation, time selection, uninitialized failure and stationary ZUPT startup.
+Boundary coverage regressions include ten and thirty missing frames at each end with
+positive/negative camera-IMU offsets, successful initialization in the remaining
+interval, entirely unsupported video, and failure on an internal IMU dropout.
 The module can be built and tested with only this repository mounted.
 
 For a data-only, full-session Docker regression, use
