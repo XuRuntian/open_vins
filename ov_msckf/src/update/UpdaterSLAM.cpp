@@ -129,9 +129,9 @@ void UpdaterSLAM::delayed_init(std::shared_ptr<State> state, std::vector<std::sh
       success_tri = initializer_feat->single_triangulation(*it1, clones_cam);
     }
 
-    // Gauss-newton refine the feature
+    // Failed triangulation leaves no valid position for inverse-depth refinement.
     bool success_refine = true;
-    if (initializer_feat->config().refine_features) {
+    if (success_tri && initializer_feat->config().refine_features) {
       success_refine = initializer_feat->single_gaussnewton(*it1, clones_cam);
     }
 

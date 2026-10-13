@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -169,6 +170,13 @@ def run(args: argparse.Namespace, *, output_dir: Path | None = None, legacy_repo
                     log.flush()
                 code = process.wait()
         report["returncode"] = code
+        if code < 0:
+            # A killed writer can leave partial CSV/JSON; preserve the primary failure.
+            report["signal"] = signal.Signals(-code).name
+            report["wall_duration_s"] = time.monotonic() - started
+            report["error"] = f"Native OpenVINS terminated by {report['signal']} (returncode {code}); raw outputs preserved, export skipped"
+            print(report["error"], flush=True)
+            return 128 - code
         native_report = output_dir / "offline_report.json"
         if native_report.is_file():
             report["offline"] = json.loads(native_report.read_text())

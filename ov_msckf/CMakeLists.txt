@@ -61,6 +61,8 @@ if (NOT ENABLE_ROS)
     target_link_libraries(roboego_openvins_offline ov_msckf_lib ${thirdparty_libraries})
     add_executable(offline_timing_test EXCLUDE_FROM_ALL ../ov_offline/tests/timing_bootstrap_test.cpp)
     target_include_directories(offline_timing_test PRIVATE ${EIGEN3_INCLUDE_DIR})
+    add_executable(feature_failure_test EXCLUDE_FROM_ALL ../ov_offline/tests/feature_failure_test.cpp)
+    target_link_libraries(feature_failure_test ov_msckf_lib ${thirdparty_libraries})
     get_filename_component(OPENVINS_SOURCE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
     configure_file(../ov_offline/launcher.py.in
             ${CMAKE_CURRENT_BINARY_DIR}/roboego_openvins_offline @ONLY)
